@@ -14,16 +14,31 @@ import (
 
 	"github.com/PuerkitoBio/fetchbot"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/jinzhu/gorm"
+	_ "github.com/jinzhu/gorm/dialects/postgres"
 )
+
+type Artwork struct {
+	gorm.Model
+	Title    string
+	Artist   string
+	Url      string
+	FavCount uint
+}
+
+type Link struct {
+	gorm.Model
+	Url string
+}
 
 var (
 	// Protect access to dup
 	mu sync.Mutex
 	// Duplicates table
 	dup = map[string]bool{}
-
+	db  *gorm.DB
 	// Command-line flags
-	seed        = flag.String("seed", "http://golang.org", "seed URL")
+	seed        = flag.String("seed", "https://www.deviantart.com/", "seed URL")
 	cancelAfter = flag.Duration("cancelafter", 0, "automatically cancel the fetchbot after a given time")
 	cancelAtURL = flag.String("cancelat", "", "automatically cancel the fetchbot at a given URL")
 	stopAfter   = flag.Duration("stopafter", 0, "automatically stop the fetchbot after a given time")
@@ -32,10 +47,20 @@ var (
 )
 
 func main() {
+	//init the db
+	var dbErr error
+	db, dbErr  = gorm.Open("postgres", "host=localhost user=postgres dbname=dA_Data sslmode=disable password=")
+	if dbErr != nil {
+		fmt.Println(dbErr)
+	}
+	db.AutoMigrate(&Artwork{})
+	db.AutoMigrate(&Link{})
+	defer db.Close()
+
 	flag.Parse()
 
 	// Parse the provided seed
-	u, err := url.Parse(*seed)
+	_, err := url.Parse(*seed)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,17 +83,25 @@ func main() {
 				fmt.Printf("[ERR] %s %s - %s\n", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
 				return
 			}
+
 			// Enqueue all links as HEAD requests
 			enqueueLinks(ctx, doc)
 		}))
 
 	// Handle HEAD requests for html responses coming from the source host - we don't want
 	// to crawl links from other hosts.
-	mux.Response().Method("HEAD").Host(u.Host).ContentType("text/html").Handler(fetchbot.HandlerFunc(
+	mux.Response().Method("HEAD").ContentType("text/html").Handler(fetchbot.HandlerFunc(
 		func(ctx *fetchbot.Context, res *http.Response, err error) {
 			if _, err := ctx.Q.SendStringGet(ctx.Cmd.URL().String()); err != nil {
 				fmt.Printf("[ERR] %s %s - %s\n", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
 			}
+
+			//doc, err := goquery.NewDocumentFromResponse(res)
+			if err != nil {
+				fmt.Printf("[ERR] %s %s - %s\n", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
+				return
+			}
+			//doc.Find()
 		}))
 
 	// Create the Fetcher, handle the logging first, then dispatch to the Muxer
@@ -197,19 +230,28 @@ func logHandler(wrapped fetchbot.Handler) fetchbot.Handler {
 
 func enqueueLinks(ctx *fetchbot.Context, doc *goquery.Document) {
 	mu.Lock()
+	fmt.Println("Processing for links... " + ctx.Cmd.URL().String())
 	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
 		val, _ := s.Attr("href")
-		// Resolve address
 		u, err := ctx.Cmd.URL().Parse(val)
+
+		// get out if its not an artwork
+		if !strings.Contains(val, "/art/") || !strings.Contains(u.Host, "deviantart.com") {
+			return
+		}
+
 		if err != nil {
 			fmt.Printf("error: resolve URL %s - %s\n", val, err)
 			return
 		}
-		if !dup[u.String()] {
+		var count int
+		db.Table("links").Where("Url = ?", u.String()).Count(&count)
+		if count <= 0 {
 			if _, err := ctx.Q.SendStringHead(u.String()); err != nil {
 				fmt.Printf("error: enqueue head %s - %s\n", u, err)
 			} else {
-				dup[u.String()] = true
+				nlink := Link{Url: u.String()}
+				db.Create(&nlink)
 			}
 		}
 	})
