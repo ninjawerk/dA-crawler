@@ -16,14 +16,17 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/postgres"
+	"strconv"
 )
 
 type Artwork struct {
 	gorm.Model
-	Title    string
-	Artist   string
-	Url      string
-	FavCount uint
+	Title     string
+	Artist    string
+	Url       string
+	ImageUrl  string
+	FavCount  int
+	ArtistUrl string
 }
 
 type Link struct {
@@ -49,7 +52,7 @@ var (
 func main() {
 	//init the db
 	var dbErr error
-	db, dbErr  = gorm.Open("postgres", "host=localhost user=postgres dbname=dA_Data sslmode=disable password=")
+	db, dbErr = gorm.Open("postgres", "host=localhost user=postgres dbname=dA_Data sslmode=disable password=")
 	if dbErr != nil {
 		fmt.Println(dbErr)
 	}
@@ -90,18 +93,41 @@ func main() {
 
 	// Handle HEAD requests for html responses coming from the source host - we don't want
 	// to crawl links from other hosts.
-	mux.Response().Method("HEAD").ContentType("text/html").Handler(fetchbot.HandlerFunc(
+	mux.Response().Method("GET").ContentType("text/html").Handler(fetchbot.HandlerFunc(
 		func(ctx *fetchbot.Context, res *http.Response, err error) {
 			if _, err := ctx.Q.SendStringGet(ctx.Cmd.URL().String()); err != nil {
 				fmt.Printf("[ERR] %s %s - %s\n", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
 			}
 
-			//doc, err := goquery.NewDocumentFromResponse(res)
+			doc, err := goquery.NewDocumentFromResponse(res)
 			if err != nil {
 				fmt.Printf("[ERR] %s %s - %s\n", ctx.Cmd.Method(), ctx.Cmd.URL(), err)
 				return
 			}
-			//doc.Find()
+			favstr := doc.Find("div.who-faved-modal").First()
+			favtext :=  favstr.Parent().First().Text()
+
+			favtextReplaced := strings.Replace(favtext,",","",-1)
+			favCount, _ := strconv.Atoi(strings.Split(favtextReplaced, " (who?)")[0])
+
+			imgContainer := doc.Find("div.dev-view-deviation").First()
+			img := imgContainer.Find("img.dev-content-full").First()
+
+
+				titleContainer := doc.Find("div.dev-title-container ").First()
+				artUrl, _ := titleContainer.Find("a.title").First().Attr("href")
+				title := titleContainer.Find("a.title").First().Text()
+				authorName := titleContainer.Find("a.username").First().Text()
+				authorLink, _ := titleContainer.Find("a.username").First().Attr("href")
+				imageSrc, _ := img.Attr("src")
+				//just double check if its in the db again, sometimes dA directs to Url from aliases
+				var count int
+				db.Table("artworks").Where("Url = ?", artUrl).Count(&count)
+				if count <= 0 {
+					artwork := Artwork{Title: title, Url: artUrl, Artist: authorName, ArtistUrl: authorLink, ImageUrl: imageSrc, FavCount:favCount }
+					db.Create(&artwork)
+				}
+
 		}))
 
 	// Create the Fetcher, handle the logging first, then dispatch to the Muxer
@@ -172,7 +198,7 @@ func runMemStats(f *fetchbot.Fetcher, tick time.Duration) {
 	// Start ticker goroutine to print mem stats at regular intervals
 	go func() {
 		c := time.Tick(tick)
-		for _ = range c {
+		for range c {
 			mu.Lock()
 			printMemStats(di)
 			mu.Unlock()
@@ -247,7 +273,7 @@ func enqueueLinks(ctx *fetchbot.Context, doc *goquery.Document) {
 		var count int
 		db.Table("links").Where("Url = ?", u.String()).Count(&count)
 		if count <= 0 {
-			if _, err := ctx.Q.SendStringHead(u.String()); err != nil {
+			if _, err := ctx.Q.SendStringGet(u.String()); err != nil {
 				fmt.Printf("error: enqueue head %s - %s\n", u, err)
 			} else {
 				nlink := Link{Url: u.String()}
